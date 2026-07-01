@@ -1,0 +1,36 @@
+name: IRED PropertyOS Ping
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ired-propertyos-ping.yml"
+      - "ired-propertyos-pinger/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ired-propertyos-ping
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    name: Ping Render app
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ping IRED PropertyOS
+        env:
+          TARGET_URL: https://ired-propertyos-monorepo.onrender.com
+          MAX_RETRIES: "3"
+          CONNECT_TIMEOUT_SECONDS: "10"
+          MAX_TIME_SECONDS: "30"
+          RETRY_DELAY_SECONDS: "10"
+        run: bash ired-propertyos-pinger/ping.sh
