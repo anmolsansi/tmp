@@ -1420,11 +1420,16 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
 
                     query_completed_normally = False
 
-                    # IMPORTANT: Do not use Google's visible pagination or the number
-                    # of new/deduplicated URLs to decide whether another Google page
-                    # exists. We explicitly request start=0,10,20,... up to the hard
-                    # max page limit. This avoids premature stops when Google collapses
-                    # similar results or when earlier queries already saw the same URLs.
+                    # Smart exhaustion detection:
+                    # Keep requesting explicit start=0,10,20,... offsets, but stop once
+                    # Google itself appears to have run out of distinct result pages.
+                    #
+                    # IMPORTANT: this is intentionally independent of seen_all_urls and
+                    # yesterday_links. A Google page may contain only jobs we've already
+                    # seen and still be a real page with later pages available.
+                    previous_google_page_urls = None
+                    consecutive_empty_google_pages = 0
+                    MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES = 2
 
                     for page_num in range(max_pages_for_ats):
                         search_url = build_search_url(
@@ -1529,6 +1534,10 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         duplicate_links = 0
                         yesterday_duplicate_links = 0
 
+                        # Every external result URL Google showed on THIS page.
+                        # Track this before ATS filtering and our own deduplication.
+                        google_page_urls = set()
+
                         # ---------------------------------------------------
                         # Parse results
                         # ---------------------------------------------------
@@ -1546,6 +1555,10 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
 
                             if "google.com" in host:
                                 continue
+
+                            # Track Google's result page independently of our ATS/domain
+                            # filters and independently of whether we've seen the job before.
+                            google_page_urls.add(normalized_url)
 
                             parsed_links += 1
 
@@ -1654,13 +1667,96 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             break
 
                         # ---------------------------------------------------
-                        # Pagination behavior
+                        # Smart Google pagination exhaustion detection
                         # ---------------------------------------------------
-                        # Do NOT stop because Google visually shows only 1-2 pages,
-                        # because a page contains only duplicates, or because no new
-                        # ATS URLs were found. The next iteration explicitly requests
-                        # the next start offset. The loop stops only at the configured
-                        # hard page limit, a manual skip/stop, or a browser error.
+                        requested_start = page_num * 10
+
+                        actual_start = None
+                        try:
+                            actual_query_params = parse_qs(
+                                urlparse(driver.current_url).query
+                            )
+                            if "start" in actual_query_params:
+                                actual_start = int(
+                                    actual_query_params["start"][0] or 0
+                                )
+                        except Exception:
+                            actual_start = None
+
+                        print(
+                            f" -> Requested Google start offset: {requested_start}"
+                        )
+                        print(
+                            f" -> Actual Google start offset: "
+                            f"{actual_start if actual_start is not None else 'not present'}"
+                        )
+                        print(
+                            f" -> Google result URLs on this page: "
+                            f"{len(google_page_urls)}"
+                        )
+
+                        # Signal 1: Google explicitly redirected us backward to an
+                        # earlier start offset. Only use this signal when Google kept
+                        # a start parameter in the final URL.
+                        if (
+                            page_num > 0
+                            and actual_start is not None
+                            and actual_start < requested_start
+                        ):
+                            print(
+                                " -> Google redirected to an earlier results page."
+                            )
+                            print(
+                                " -> No additional Google pages appear to exist."
+                            )
+                            query_completed_normally = True
+                            break
+
+                        # Signal 2: Google returned the exact same result URL set as
+                        # the immediately previous page. This compares page-to-page,
+                        # NOT against CSV/history dedupe state.
+                        if (
+                            previous_google_page_urls is not None
+                            and google_page_urls
+                            and google_page_urls == previous_google_page_urls
+                        ):
+                            print(
+                                " -> Google repeated the exact previous result page."
+                            )
+                            print(
+                                " -> Treating this as the end of available pages."
+                            )
+                            query_completed_normally = True
+                            break
+
+                        # Signal 3: no external Google result URLs were parsed.
+                        # Require two consecutive empty pages to avoid stopping on a
+                        # one-off Google markup/parser glitch.
+                        if not google_page_urls:
+                            consecutive_empty_google_pages += 1
+                            print(
+                                f" -> No Google result URLs detected. "
+                                f"Empty-page count: "
+                                f"{consecutive_empty_google_pages}/"
+                                f"{MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES}"
+                            )
+                        else:
+                            consecutive_empty_google_pages = 0
+
+                        if (
+                            consecutive_empty_google_pages
+                            >= MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES
+                        ):
+                            print(
+                                " -> Two consecutive Google pages contained "
+                                "no result URLs."
+                            )
+                            print(" -> Ending this query.")
+                            query_completed_normally = True
+                            break
+
+                        if google_page_urls:
+                            previous_google_page_urls = set(google_page_urls)
 
                         # ---------------------------------------------------
                         # Timing / delay before next page
