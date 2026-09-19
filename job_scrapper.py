@@ -58,8 +58,8 @@ SKIP_KNOWN_NO_SPONSOR_COMPANIES = True
 STOP_GOOGLE_SEARCH_ON_BROWSER_ERROR = True
 MAX_GOOGLE_PAGE_ERRORS_BEFORE_STOP = 3
 
-WAIT_BETWEEN_GOOGLE_PAGES = (58, 75)
-WAIT_BETWEEN_GOOGLE_SEARCHES = (70, 88)
+WAIT_BETWEEN_GOOGLE_PAGES = (70, 80)
+WAIT_BETWEEN_GOOGLE_SEARCHES = (80, 94)
 WAIT_AFTER_GOOGLE_BLOCK = (200, 300)
 
 REQUEST_TIMEOUT_SECONDS = 18
@@ -1388,6 +1388,7 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                 print("==============================")
 
                 for job_title_label, allowed_phrases in JOB_SEARCHES:
+
                     current_query_number += 1
                     current_query_index = current_query_number - 1
 
@@ -1670,9 +1671,9 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
 
                         # Primary stop signal:
                         # If Google gave us zero parsable external result links,
-                        # do not waste time requesting page 6, 7, 8... up to the
-                        # hard page limit. This is independent of ATS filtering,
-                        # CSV/history dedupe, and accepted-link count.
+                        # stop this query immediately instead of wasting requests
+                        # up to the hard page limit. This is independent of ATS
+                        # filtering, CSV/history dedupe, and accepted-link count.
                         if parsed_links == 0:
                             print(
                                 f" -> Page {page_num + 1} produced zero "
@@ -1798,6 +1799,10 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         print(
                             f" -> Checkpoint saved. Completed query "
                             f"{current_query_number}/{total_queries}: {query_label}"
+                        )
+                        sleep_random(
+                            WAIT_BETWEEN_GOOGLE_SEARCHES,
+                            "before next Google search",
                         )
                         print(f" -> Rows flushed after query completion.")
                         print(f"    Accepted rows added: {accepted_added}")
