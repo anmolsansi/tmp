@@ -58,6 +58,18 @@ SKIP_KNOWN_NO_SPONSOR_COMPANIES = True
 STOP_GOOGLE_SEARCH_ON_BROWSER_ERROR = True
 MAX_GOOGLE_PAGE_ERRORS_BEFORE_STOP = 3
 
+# Network safety net.
+# If the internet/Wi-Fi is unavailable, pause for 10 minutes and retry
+# the SAME network operation instead of letting the run fail or skip ahead.
+NETWORK_RETRY_WAIT_SECONDS = 10 * 60
+NETWORK_CHECK_TIMEOUT_SECONDS = 8
+NETWORK_CHECK_URLS = (
+    "https://clients3.google.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://github.com",
+)
+NETWORK_RECOVERY_LOCK = threading.Lock()
+
 WAIT_BETWEEN_GOOGLE_PAGES = (63, 73)
 WAIT_BETWEEN_GOOGLE_SEARCHES = (75, 82)
 WAIT_AFTER_GOOGLE_BLOCK = (200, 300)
@@ -721,6 +733,134 @@ def sleep_random(wait_range: tuple[int, int], reason: str):
     wait_time = random.uniform(wait_range[0], wait_range[1])
     print(f" -> Sleeping {round(wait_time, 1)} seconds: {reason}")
     time.sleep(wait_time)
+
+
+def has_internet_connection() -> bool:
+    """
+    Return True when at least one lightweight external endpoint is reachable.
+
+    Any HTTP response counts as connectivity; we only care whether the
+    machine can reach the internet, not whether the endpoint returned 200.
+    """
+    for check_url in NETWORK_CHECK_URLS:
+        try:
+            requests.get(
+                check_url,
+                timeout=NETWORK_CHECK_TIMEOUT_SECONDS,
+                allow_redirects=True,
+            )
+            return True
+        except requests.RequestException:
+            continue
+        except Exception:
+            continue
+
+    return False
+
+
+def wait_for_internet_connection():
+    """
+    Pause in 10-minute intervals while internet connectivity is unavailable.
+
+    The lock prevents all parallel JD workers from independently starting
+    their own 10-minute recovery timers. One worker performs the wait; the
+    others re-check connectivity after the lock is released.
+    """
+    if has_internet_connection():
+        return
+
+    with NETWORK_RECOVERY_LOCK:
+        # Another worker may have already waited and restored connectivity
+        # while this thread was waiting for the lock.
+        if has_internet_connection():
+            return
+
+        while True:
+            wait_minutes = NETWORK_RETRY_WAIT_SECONDS // 60
+
+            print(
+                f"\nInternet connection appears to be offline. "
+                f"Pausing for {wait_minutes} minutes before retrying..."
+            )
+
+            time.sleep(NETWORK_RETRY_WAIT_SECONDS)
+
+            if has_internet_connection():
+                print(
+                    "\nInternet connection restored. "
+                    "Retrying the failed network operation..."
+                )
+                return
+
+            print(
+                f"\nInternet is still unavailable. "
+                f"Waiting another {wait_minutes} minutes..."
+            )
+
+
+def requests_get_with_network_retry(url: str, **kwargs):
+    """
+    requests.get() with Wi-Fi/internet outage recovery.
+
+    A site-specific HTTP/network failure is still returned to the caller's
+    normal error handling when the wider internet connection is available.
+    """
+    while True:
+        try:
+            return requests.get(url, **kwargs)
+        except requests.RequestException:
+            if not has_internet_connection():
+                wait_for_internet_connection()
+                continue
+
+            raise
+
+
+def browser_page_indicates_network_error(driver) -> bool:
+    try:
+        title = (driver.title or "").lower()
+        source = (driver.page_source or "").lower()
+        current_url = (driver.current_url or "").lower()
+    except Exception:
+        return False
+
+    combined = f"{title} {source} {current_url}"
+
+    network_markers = (
+        "err_internet_disconnected",
+        "err_network_changed",
+        "err_name_not_resolved",
+        "there is no internet connection",
+        "no internet",
+        "chrome-error://chromewebdata",
+    )
+
+    return any(marker in combined for marker in network_markers)
+
+
+def driver_get_with_network_retry(driver, url: str):
+    """
+    Selenium driver.get() with Wi-Fi/internet outage recovery.
+
+    If Chrome throws because the connection is down, or loads its offline
+    error page, wait 10 minutes and retry the SAME URL.
+    """
+    while True:
+        try:
+            driver.get(url)
+        except Exception:
+            if not has_internet_connection():
+                wait_for_internet_connection()
+                continue
+
+            raise
+
+        if browser_page_indicates_network_error(driver):
+            if not has_internet_connection():
+                wait_for_internet_connection()
+                continue
+
+        return
 
 
 def safe_quit_driver(driver):
@@ -1451,7 +1591,7 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             print(f"REQUESTED URL: {search_url}")
                             print("==============================================")
 
-                            driver.get(search_url)
+                            driver_get_with_network_retry(driver, search_url)
                             time.sleep(random.uniform(6, 12))
 
                             print("\n==============================================")
@@ -1861,7 +2001,11 @@ def fetch_page_html_fast(url: str) -> str:
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests_get_with_network_retry(
+            url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         if response.status_code == 200 and len(response.text) >= MIN_HTML_LENGTH_FOR_REQUESTS:
             return response.text
     except Exception:
@@ -2146,7 +2290,10 @@ def fetch_greenhouse_api_jd(url: str) -> tuple[str, str]:
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs/{job_id}"
 
     try:
-        response = requests.get(api_url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests_get_with_network_retry(
+            api_url,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         if response.status_code != 200:
             return "", ""
 
@@ -2461,7 +2608,7 @@ def extract_with_requests_or_selenium(driver, url: str, domain: str, title: str 
     extraction_method = "selenium_fallback"
     RUN_SUMMARY.increment("selenium_fallback_extractions")
 
-    driver.get(url)
+    driver_get_with_network_retry(driver, url)
     time.sleep(random.uniform(3, 5))
 
     try:
