@@ -1282,27 +1282,65 @@ COMPANY_MEMORY = None
 
 
 def clean_google_href(href: str) -> str:
+    """
+    Normalize Google result hrefs into the real destination URL.
+
+    Google may expose an organic result as:
+      - https://example.com/job/123
+      - /url?q=https://example.com/job/123&...
+      - /url?url=https://example.com/job/123&...
+      - https://www.google.com/url?...&q=https://example.com/job/123
+    """
     if not href:
         return ""
 
-    href = href.strip()
+    href = html_lib.unescape(href.strip())
 
-    if href.startswith("/url?q="):
+    try:
         parsed = urllib.parse.urlparse(href)
-        query_params = urllib.parse.parse_qs(parsed.query)
-        return query_params.get("q", [""])[0].strip()
+        host = (parsed.netloc or "").lower()
+
+        is_google_redirect = (
+            parsed.path == "/url"
+            and (
+                not host
+                or host == "google.com"
+                or host == "www.google.com"
+                or host.endswith(".google.com")
+            )
+        )
+
+        if is_google_redirect:
+            query_params = urllib.parse.parse_qs(parsed.query)
+
+            for key in ("q", "url"):
+                candidate = query_params.get(key, [""])[0].strip()
+                if candidate.startswith(("http://", "https://")):
+                    return urllib.parse.unquote(candidate)
+
+    except Exception:
+        pass
 
     return href
 
 
 def extract_result_link(result) -> tuple[str, str]:
+    """
+    Extract one Google organic result from a container.
+
+    Kept for compatibility with the existing container parser.
+    """
     title_tag = result.select_one("h3")
     if not title_tag:
         return "", ""
 
     anchor = title_tag.find_parent("a", href=True)
+
     if not anchor:
-        anchor = result.select_one("a[href]")
+        for candidate in result.select("a[href]"):
+            if candidate.find("h3"):
+                anchor = candidate
+                break
 
     if not anchor:
         return "", ""
@@ -1311,6 +1349,48 @@ def extract_result_link(result) -> tuple[str, str]:
     title = title_tag.get_text(" ", strip=True)
 
     return title, href
+
+
+def extract_google_result_links(soup: BeautifulSoup) -> list[tuple[str, str]]:
+    """
+    Extract Google result title/URL pairs without depending on Google's
+    outer result-container class names.
+
+    Google's div.g / div.MjjYud / div.yuRUbf markup changes frequently,
+    but organic result titles still normally appear as an <h3> inside
+    an <a href="...">. This makes URL extraction much more resilient.
+    """
+    extracted = []
+    seen_urls = set()
+
+    for title_tag in soup.find_all("h3"):
+        anchor = title_tag.find_parent("a", href=True)
+        if not anchor:
+            continue
+
+        title = normalize_space(title_tag.get_text(" ", strip=True))
+        href = clean_google_href(anchor.get("href", ""))
+
+        if not title or not href:
+            continue
+
+        if not href.startswith(("http://", "https://")):
+            continue
+
+        host = normalize_domain(href)
+
+        if not host or "google.com" in host:
+            continue
+
+        normalized_href = canonicalize_ats_job_url(href)
+
+        if normalized_href in seen_urls:
+            continue
+
+        seen_urls.add(normalized_href)
+        extracted.append((title, href))
+
+    return extracted
 
 
 def build_google_title_query(allowed_phrases: list[str]) -> str:
@@ -1660,11 +1740,16 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             continue
 
                         # ---------------------------------------------------
-                        # Find Google result containers
+                        # Find Google result containers + robust organic links
                         # ---------------------------------------------------
                         search_results = soup.select(
                             "div.g, div.MjjYud, div.yuRUbf"
                         )
+
+                        # Do NOT rely on the container classes above for extraction.
+                        # Google changes those classes frequently. Instead, extract
+                        # organic results from <h3> elements and their parent anchors.
+                        google_results = extract_google_result_links(soup)
 
                         parsed_links = 0
                         ats_links = 0
@@ -1680,19 +1765,11 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         # ---------------------------------------------------
                         # Parse results
                         # ---------------------------------------------------
-                        for result in search_results:
-                            title, final_url = extract_result_link(result)
-
-                            if not title or not final_url:
-                                continue
-
-                            if not final_url.startswith("http"):
-                                continue
-
+                        for title, final_url in google_results:
                             normalized_url = canonicalize_ats_job_url(final_url)
                             host = normalize_domain(normalized_url)
 
-                            if "google.com" in host:
+                            if not host or "google.com" in host:
                                 continue
 
                             # Track Google's result page independently of our ATS/domain
@@ -1758,6 +1835,7 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         # Page diagnostics
                         # ---------------------------------------------------
                         print(f" -> Google result containers: {len(search_results)}")
+                        print(f" -> H3/anchor Google results extracted: {len(google_results)}")
                         print(f" -> Parsed links on page: {parsed_links}")
                         print(f" -> ATS links found: {ats_links}")
                         print(f" -> Accepted links collected: {accepted_links}")
