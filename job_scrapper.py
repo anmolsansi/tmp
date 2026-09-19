@@ -1281,15 +1281,88 @@ class CompanySponsorshipMemory:
 COMPANY_MEMORY = None
 
 
+def resolve_google_goto_href(href: str) -> str:
+    """
+    Resolve Google's newer /goto?url=CAES... result links.
+
+    The CAES value is an opaque Google token, not a locally-decodable target URL.
+    Google resolves it with a 302 response whose Location header contains the
+    actual destination. We intentionally do NOT follow the destination request.
+    """
+    if not href:
+        return ""
+
+    href = html_lib.unescape(href.strip())
+
+    try:
+        parsed = urllib.parse.urlparse(href)
+        host = (parsed.netloc or "").lower()
+
+        is_google_goto = (
+            parsed.path == "/goto"
+            and (
+                not host
+                or host == "google.com"
+                or host == "www.google.com"
+                or host.endswith(".google.com")
+            )
+        )
+
+        if not is_google_goto:
+            return ""
+
+        absolute_goto_url = urllib.parse.urljoin(
+            "https://www.google.com",
+            href,
+        )
+
+        response = requests_get_with_network_retry(
+            absolute_goto_url,
+            allow_redirects=False,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/152.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+
+        location = (response.headers.get("Location") or "").strip()
+
+        if 300 <= response.status_code < 400 and location:
+            resolved = urllib.parse.urljoin(
+                "https://www.google.com",
+                html_lib.unescape(location),
+            )
+
+            resolved_host = normalize_domain(resolved)
+
+            if resolved.startswith(("http://", "https://")) and "google.com" not in resolved_host:
+                return resolved
+
+        print(
+            f" -> Could not resolve Google /goto link "
+            f"(status={response.status_code})."
+        )
+
+    except Exception as e:
+        print(f" -> Google /goto resolution failed: {e}")
+
+    return ""
+
+
 def clean_google_href(href: str) -> str:
     """
     Normalize Google result hrefs into the real destination URL.
 
-    Google may expose an organic result as:
-      - https://example.com/job/123
-      - /url?q=https://example.com/job/123&...
-      - /url?url=https://example.com/job/123&...
-      - https://www.google.com/url?...&q=https://example.com/job/123
+    Handles:
+      - direct destination URLs
+      - /url?q=https://...
+      - /url?url=https://...
+      - /goto?url=CAES... (resolved through Google's 302 Location header)
     """
     if not href:
         return ""
@@ -1315,14 +1388,28 @@ def clean_google_href(href: str) -> str:
 
             for key in ("q", "url"):
                 candidate = query_params.get(key, [""])[0].strip()
+                candidate = urllib.parse.unquote(candidate)
+
                 if candidate.startswith(("http://", "https://")):
-                    return urllib.parse.unquote(candidate)
+                    return candidate
+
+        is_google_goto = (
+            parsed.path == "/goto"
+            and (
+                not host
+                or host == "google.com"
+                or host == "www.google.com"
+                or host.endswith(".google.com")
+            )
+        )
+
+        if is_google_goto:
+            return resolve_google_goto_href(href)
 
     except Exception:
         pass
 
     return href
-
 
 def extract_result_link(result) -> tuple[str, str]:
     """
