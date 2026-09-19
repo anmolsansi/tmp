@@ -1827,42 +1827,13 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             continue
 
                         # ---------------------------------------------------
-                        # Find Google result containers + robust organic links
+                        # Extract Google organic result links
                         # ---------------------------------------------------
-                        search_results = soup.select(
-                            "div.g, div.MjjYud, div.yuRUbf"
-                        )
-
-                        # Do NOT rely only on the container classes above for extraction.
-                        # Google changes those classes frequently. First extract organic
-                        # results from <h3> elements and their parent anchors.
+                        # Do not depend on Google's changing outer container classes
+                        # such as div.g / div.MjjYud / div.yuRUbf. Extract directly
+                        # from <h3> result titles and their parent <a href="...">.
+                        google_h3_count = len(soup.find_all("h3"))
                         google_results = extract_google_result_links(soup)
-
-                        # Fallback: if Google's current markup does not place the <h3>
-                        # directly inside the result anchor, reuse the broader container
-                        # parser instead of incorrectly treating the page as empty.
-                        if not google_results and search_results:
-                            fallback_results = []
-                            fallback_seen_urls = set()
-
-                            for result in search_results:
-                                title, final_url = extract_result_link(result)
-
-                                if not title or not final_url:
-                                    continue
-
-                                if not final_url.startswith(("http://", "https://")):
-                                    continue
-
-                                normalized_fallback_url = canonicalize_ats_job_url(final_url)
-
-                                if normalized_fallback_url in fallback_seen_urls:
-                                    continue
-
-                                fallback_seen_urls.add(normalized_fallback_url)
-                                fallback_results.append((title, final_url))
-
-                            google_results = fallback_results
 
                         parsed_links = 0
                         ats_links = 0
@@ -1947,8 +1918,8 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         # ---------------------------------------------------
                         # Page diagnostics
                         # ---------------------------------------------------
-                        print(f" -> Google result containers: {len(search_results)}")
-                        print(f" -> H3/anchor Google results extracted: {len(google_results)}")
+                        print(f" -> Google H3 titles found: {google_h3_count}")
+                        print(f" -> Google result URLs extracted: {len(google_results)}")
                         print(f" -> Parsed links on page: {parsed_links}")
                         print(f" -> ATS links found: {ats_links}")
                         print(f" -> Accepted links collected: {accepted_links}")
