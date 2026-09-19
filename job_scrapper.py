@@ -1428,8 +1428,6 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                     # yesterday_links. A Google page may contain only jobs we've already
                     # seen and still be a real page with later pages available.
                     previous_google_page_urls = None
-                    consecutive_empty_google_pages = 0
-                    MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES = 2
 
                     for page_num in range(max_pages_for_ats):
                         search_url = build_search_url(
@@ -1669,6 +1667,24 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                         # ---------------------------------------------------
                         # Smart Google pagination exhaustion detection
                         # ---------------------------------------------------
+
+                        # Primary stop signal:
+                        # If Google gave us zero parsable external result links,
+                        # do not waste time requesting page 6, 7, 8... up to the
+                        # hard page limit. This is independent of ATS filtering,
+                        # CSV/history dedupe, and accepted-link count.
+                        if parsed_links == 0:
+                            print(
+                                f" -> Page {page_num + 1} produced zero "
+                                "parsable Google result links."
+                            )
+                            print(
+                                " -> Treating this as the end of available "
+                                "Google result pages."
+                            )
+                            query_completed_normally = True
+                            break
+
                         requested_start = page_num * 10
 
                         actual_start = None
@@ -1726,32 +1742,6 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             print(
                                 " -> Treating this as the end of available pages."
                             )
-                            query_completed_normally = True
-                            break
-
-                        # Signal 3: no external Google result URLs were parsed.
-                        # Require two consecutive empty pages to avoid stopping on a
-                        # one-off Google markup/parser glitch.
-                        if not google_page_urls:
-                            consecutive_empty_google_pages += 1
-                            print(
-                                f" -> No Google result URLs detected. "
-                                f"Empty-page count: "
-                                f"{consecutive_empty_google_pages}/"
-                                f"{MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES}"
-                            )
-                        else:
-                            consecutive_empty_google_pages = 0
-
-                        if (
-                            consecutive_empty_google_pages
-                            >= MAX_CONSECUTIVE_EMPTY_GOOGLE_PAGES
-                        ):
-                            print(
-                                " -> Two consecutive Google pages contained "
-                                "no result URLs."
-                            )
-                            print(" -> Ending this query.")
                             query_completed_normally = True
                             break
 
