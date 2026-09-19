@@ -1746,10 +1746,36 @@ def collect_google_links(start_time, yesterday_links: set[str], date_suffix: str
                             "div.g, div.MjjYud, div.yuRUbf"
                         )
 
-                        # Do NOT rely on the container classes above for extraction.
-                        # Google changes those classes frequently. Instead, extract
-                        # organic results from <h3> elements and their parent anchors.
+                        # Do NOT rely only on the container classes above for extraction.
+                        # Google changes those classes frequently. First extract organic
+                        # results from <h3> elements and their parent anchors.
                         google_results = extract_google_result_links(soup)
+
+                        # Fallback: if Google's current markup does not place the <h3>
+                        # directly inside the result anchor, reuse the broader container
+                        # parser instead of incorrectly treating the page as empty.
+                        if not google_results and search_results:
+                            fallback_results = []
+                            fallback_seen_urls = set()
+
+                            for result in search_results:
+                                title, final_url = extract_result_link(result)
+
+                                if not title or not final_url:
+                                    continue
+
+                                if not final_url.startswith(("http://", "https://")):
+                                    continue
+
+                                normalized_fallback_url = canonicalize_ats_job_url(final_url)
+
+                                if normalized_fallback_url in fallback_seen_urls:
+                                    continue
+
+                                fallback_seen_urls.add(normalized_fallback_url)
+                                fallback_results.append((title, final_url))
+
+                            google_results = fallback_results
 
                         parsed_links = 0
                         ats_links = 0
